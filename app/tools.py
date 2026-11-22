@@ -146,3 +146,32 @@ def search_graph(query: str) -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except APIError as e:
         return json.dumps({"error": api_error_message(e.code)}, ensure_ascii=False)
+
+def expand_graph_from_pages(page_ids: list[str]) -> str:
+    """指定したページIDを起点に、前後ページや共通用語をたどって関連ページを返す。
+
+    browse_tree で見つけたページID（例: ["lec02-main-p003", "lec03-main-p008"]）を
+    渡して、周辺文脈や関連トピックを確認するために使う。
+    """
+    import sqlite3
+    from app.retrieval import expand_graph_from_pages as expand
+
+    try:
+        return json.dumps(expand(page_ids), ensure_ascii=False)
+    except (ValueError, OSError, sqlite3.Error) as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+def browse_tree_and_expand(node_id: str | None = None) -> str:
+    """目次とページの先頭文を返す。ページIDを指定すると全文と、グラフ拡張による関連ページを返す。
+
+    最初はnode_idを省略する。続いて返されたIDを指定して目次をたどる。
+    ページに到達すると関連ページ情報（graph_context）も自動で含まれるため、
+    別途グラフ拡張ツールを呼ばなくても周辺文脈を確認できる。
+    """
+    import sqlite3
+    from app.retrieval import browse_tree_and_expand as browse_and_expand
+
+    try:
+        return json.dumps(browse_and_expand(node_id), ensure_ascii=False)
+    except (ValueError, OSError, sqlite3.Error) as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)

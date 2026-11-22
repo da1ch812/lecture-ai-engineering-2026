@@ -209,3 +209,107 @@ if __name__ == "__main__":
         print(f"タイトル: {result['title']}")
         print(f"ページ: {result['page']}")
         print(f"\n{result['content']}")
+
+def expand_graph_from_pages(
+    page_ids: list[str],
+    relations: tuple[str, ...] = ("next_page", "mentions"),
+    exclude_same_section: bool = False,
+) -> dict:
+    """指定したページID群を入口に、前後ページや共通用語で関連ページを広げる。"""
+    pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
+    valid_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for pid in page_ids:
+        if isinstance(pid, str) and pid in pages and pid not in seen_ids:
+            seen_ids.add(pid)
+            valid_ids.append(pid)
+            if len(valid_ids) >= GRAPH_START_K:
+                break
+    if not valid_ids:
+        raise ValueError("有効な対象ページIDが見つかりません。")
+
+    graph = json.loads(RAG_GRAPH.read_text(encoding="utf-8"))
+    nodes = {
+        node["id"]: node
+        for node in graph["nodes"]
+        if node["kind"] == "term" or node["id"] in pages
+    }
+    adjacent: dict[str, set[str]] = defaultdict(set)
+    for edge in graph["edges"]:
+        a, b = edge["source"], edge["target"]
+        if edge["relation"] in relations and a in nodes and b in nodes:
+            adjacent[a].add(b)
+            adjacent[b].add(a)
+
+    seed_set = set(valid_ids)
+    excluded_sections = {
+        (pages[pid].get("document_id"), pages[pid].get("section"))
+        for pid in valid_ids
+    }
+    results: list[dict] = []
+    candidates: dict[str, tuple[tuple, dict]] = {}
+
+    for rank, root in enumerate(valid_ids):
+        results.append({
+            **pages[root],
+            "hops": 0,
+            "path": [{"id": root, "title": pages[root]["title"]}],
+        })
+        queue = deque([(root, [root])])
+        visited = {root}
+        while queue:
+            current, path = queue.popleft()
+            if len(path) - 1 >= GRAPH_HOPS:
+                continue
+            neighbors = sorted(adjacent[current], key=lambda n: (len(adjacent[n]), n))
+            for neighbor in neighbors:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                route = path + [neighbor]
+                queue.append((neighbor, route))
+                if neighbor not in pages or neighbor in seed_set:
+                    continue
+                if exclude_same_section:
+                    neighbor_key = (pages[neighbor].get("document_id"), pages[neighbor].get("section"))
+                    if neighbor_key in excluded_sections:
+                        continue
+                frequency = max(
+                    (len(adjacent[n]) for n in route if nodes[n]["kind"] == "term"),
+                    default=0,
+                )
+                priority = (len(route) - 1, frequency, rank, neighbor)
+                candidate = {
+                    **pages[neighbor],
+                    "hops": len(route) - 1,
+                    "path": [{"id": n, "title": nodes[n]["title"]} for n in route],
+                }
+                if neighbor not in candidates or priority < candidates[neighbor][0]:
+                    candidates[neighbor] = (priority, candidate)
+
+    expanded = [candidate for _, candidate in sorted(candidates.values())]
+    return {
+        "seeds": results,
+        "expanded": expanded[: max(0, GRAPH_MAX_RESULTS - len(results))],
+        "max_hops": GRAPH_HOPS,
+    }
+
+
+def browse_tree_and_expand(node_id: str | None = None) -> dict:
+    """目次をたどり、ページ（末端ノード）に到達したらグラフ拡張の関連ページも併せて返す。"""
+    # 1. 既存の目次・ページ取得を実行
+    result = browse_tree(node_id)
+    node = result["node"]
+
+    # 2. ページノードかつ子がない場合は、共通用語（mentions）のみで別セクションの関連ページを拡張
+    if node.get("kind") == "page" and not result.get("children"):
+        try:
+            result["graph_context"] = expand_graph_from_pages(
+                [node["id"]],
+                relations=("mentions",),
+                exclude_same_section=True,
+            )
+        except (ValueError, OSError, sqlite3.Error) as e:
+            result["graph_context"] = {"error": str(e), "seeds": [], "expanded": []}
+
+    return result
